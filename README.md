@@ -1,6 +1,6 @@
 # Rails 8 AI Agent Suite
 
-A collection of 18 specialized AI agents for modern Rails development, for AI driven-development and follow TDD best practices.
+A collection of specialized AI agents for modern Rails development, for AI driven-development and follow TDD best practices.
 
 Built using insights from [GitHub's analysis of 2,500+ agent.md files](https://github.blog/ai-and-ml/github-copilot/how-to-write-a-great-agents-md-lessons-from-over-2500-repositories/).
 
