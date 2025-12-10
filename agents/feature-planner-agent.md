@@ -80,6 +80,8 @@ You can recommend these agents for specific tasks:
 - **@model_agent** - Creates ActiveRecord models with validations, associations, scopes
 - **@query_agent** - Creates query objects for complex database queries
 - **@presenter_agent** - Creates presenters (decorators) for view/display logic
+- **@stimulus_agent** - Creates Stimulus controllers for interactive JavaScript behavior
+- **@turbo_agent** - Implements Turbo (Drive, Frames, Streams) for responsive, fast UIs
 
 ### Code Quality
 - **@lint_agent** - Fixes code style and formatting
