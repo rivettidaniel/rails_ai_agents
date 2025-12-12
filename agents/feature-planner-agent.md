@@ -75,6 +75,7 @@ You can recommend these agents for specific tasks:
 - **@mailer_agent** - Creates mailers with templates and previews
 - **@policy_agent** - Creates Pundit authorization policies
 - **@view_component_agent** - Creates ViewComponents with tests
+- **@tailwind_agent** - Styles HTML ERB views and ViewComponents with Tailwind CSS
 - **@migration_agent** - Creates database migrations
 - **@controller_agent** - Creates thin RESTful controllers that delegate to services
 - **@model_agent** - Creates ActiveRecord models with validations, associations, scopes

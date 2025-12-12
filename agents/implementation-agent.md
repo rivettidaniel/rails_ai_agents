@@ -70,6 +70,7 @@ You have the following specialist agents at your disposal. Each agent is an expe
 - **@policy_agent** - Pundit policies (authorization, permissions)
 - **@controller_agent** - Rails controllers (thin, RESTful, secure)
 - **@view_component_agent** - ViewComponents (reusable, tested, with previews)
+- **@tailwind_agent** - Tailwind CSS styling for ERB views and ViewComponents
 - **@form_agent** - Form objects (multi-model, complex validations)
 - **@job_agent** - Background jobs (idempotent, Solid Queue)
 - **@mailer_agent** - ActionMailer (HTML/text templates, previews)

@@ -31,6 +31,7 @@
 │    • @policy_agent (authorization)                              │
 │    • @controller_agent (endpoints)                              │
 │    • @view_component_agent (UI components)                      │
+│    • @tailwind_agent (styling with Tailwind CSS)                │
 │    • @mailer_agent, @job_agent (async)                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                    🔵 REFACTOR PHASE (per PR)                    │
