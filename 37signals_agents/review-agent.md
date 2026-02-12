@@ -107,30 +107,52 @@ class ProjectCreationService
   end
 end
 
-# ✅ PATTERN
+# ✅ PATTERN - NO side-effect callbacks
 class Project < ApplicationRecord
   belongs_to :creator, class_name: "User", default: -> { Current.user }
 
-  after_create_commit :notify_team
+  # NO callbacks for side effects!
+  # Side effects belong in the controller
+end
 
-  private
+# Controller handles side effects explicitly
+class ProjectsController < ApplicationController
+  def create
+    @project = Project.new(project_params)
+    @project.creator = Current.user
 
-  def notify_team
-    NotificationMailer.project_created(self).deliver_later
+    if @project.save
+      # Side effects happen here, not in model callbacks
+      NotificationMailer.project_created(@project).deliver_later
+      redirect_to @project
+    else
+      render :new, status: :unprocessable_entity
+    end
   end
 end
 ```
 
 **Review Feedback:**
 ```
-❌ Service object is unnecessary overhead. This logic belongs in the Project model.
+❌ Service object is unnecessary overhead. This logic belongs in the controller.
 
 Move to:
-- Use default: -> { Current.user } for creator assignment
-- Use after_create_commit callback for notifications
+- Use default: -> { Current.user } for creator assignment in model
+- Handle notifications in CONTROLLER after successful save
 - Remove ProjectCreationService entirely
 
-Rich domain models > Service objects
+Controller pattern:
+def create
+  @project = Project.new(project_params)
+  if @project.save
+    NotificationMailer.project_created(@project).deliver_later
+    redirect_to @project
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+
+NEVER use after_create_commit for side effects - put them in controllers!
 
 See: rails_style_guide.md#model-layer--concerns
 ```
@@ -264,11 +286,22 @@ class CommentsController < ApplicationController
   end
 end
 
-# ✅ PATTERN
+# ✅ PATTERN - Side effects in controller
 class CommentsController < ApplicationController
   def create
-    @comment = @card.comments.create!(comment_params)
-    redirect_to @card
+    @comment = @card.comments.build(comment_params)
+    @comment.creator = Current.user
+
+    if @comment.save
+      # Handle side effects in controller
+      @comment.mentioned_users.each do |user|
+        NotificationMailer.mentioned(user, @comment).deliver_later
+      end
+
+      redirect_to @card
+    else
+      render :new, status: :unprocessable_entity
+    end
   end
 end
 
@@ -276,34 +309,33 @@ class Comment < ApplicationRecord
   belongs_to :creator, class_name: "User", default: -> { Current.user }
   belongs_to :account, default: -> { card.account }
 
-  after_create_commit :notify_mentions
-
+  # ✅ Business logic method (not callback)
   def mentioned_users
     usernames = body.scan(/@(\w+)/).flatten
     account.users.where(username: usernames)
   end
 
-  private
-
-  def notify_mentions
-    mentioned_users.each do |user|
-      NotificationMailer.mentioned(user, self).deliver_later
-    end
-  end
+  # NO after_create_commit callback!
+  # Notifications are handled in the controller
 end
 ```
 
 **Review Feedback:**
 ```
-❌ Business logic in controller should move to model.
+✅ Good separation: business logic in model, side effects in controller.
 
-Move to Comment model:
-- Mention parsing → mentioned_users method
-- Default values → belongs_to default: lambdas
-- Notification logic → after_create_commit callback
+Pattern:
+- Mention parsing → mentioned_users method in model ✅
+- Default values → belongs_to default: lambdas ✅
+- Notification logic → controller after save ✅
 
-Controller should just orchestrate:
-@card.comments.create!(comment_params)
+Controller orchestrates with explicit side effects:
+if @comment.save
+  @comment.mentioned_users.each { |u| NotificationMailer.mentioned(u, @comment).deliver_later }
+  redirect_to @card
+end
+
+NEVER use after_create_commit for notifications!
 
 See: rails_style_guide.md#controller-design
 ```
@@ -502,7 +534,106 @@ Convert to:
 See: rails_style_guide.md#testing-approach
 ```
 
-### 10. Missing Background Jobs
+### 10. Callback Anti-Pattern: Side Effects in Models
+
+**Red Flag:** Using `after_create`, `after_save`, `after_commit` for side effects
+
+```ruby
+# ❌ ANTI-PATTERN - Side effects in callbacks
+class User < ApplicationRecord
+  after_create :send_welcome_email
+  after_save :sync_to_crm
+  after_commit :notify_admin
+
+  private
+
+  def send_welcome_email
+    UserMailer.welcome(self).deliver_later
+  end
+
+  def sync_to_crm
+    CrmSync.sync_user(self)
+  end
+
+  def notify_admin
+    AdminNotifier.new_user(self).notify
+  end
+end
+
+# Controller is misleadingly simple - hides side effects
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+    @user.save  # Hidden: emails sent, CRM synced, admin notified!
+    redirect_to @user
+  end
+end
+
+# ✅ PATTERN - Side effects explicit in controller
+class User < ApplicationRecord
+  # ONLY use before_validation for data normalization
+  before_validation :normalize_email
+
+  private
+
+  def normalize_email
+    self.email = email.strip.downcase if email.present?
+  end
+
+  # NO after_create, after_save, after_commit for side effects!
+end
+
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+
+    if @user.save
+      # ✅ All side effects are explicit and visible
+      UserMailer.welcome(@user).deliver_later
+      CrmSync.sync_user(@user)
+      AdminNotifier.new_user(@user).notify
+
+      redirect_to @user, notice: "Welcome!"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+**Review Feedback:**
+```
+❌ CRITICAL: Side-effect callbacks violate explicit controller pattern.
+
+Problems:
+- Hidden side effects make code hard to understand
+- Difficult to test without triggering emails/API calls
+- Bulk operations trigger callbacks N times
+- Transaction boundaries unclear
+- No way to skip side effects when needed
+
+Move to controller:
+1. Remove ALL after_create/after_save/after_commit callbacks for side effects
+2. Keep ONLY before_validation callbacks for data normalization
+3. Handle emails, notifications, API calls in controller after save
+4. Make side effects explicit and visible
+
+Before (hidden):
+@user.save  # What happens? Who knows!
+
+After (explicit):
+if @user.save
+  UserMailer.welcome(@user).deliver_later
+  CrmSync.sync_user(@user)
+  redirect_to @user
+end
+
+Rule: Models normalize data, controllers handle side effects.
+
+See: rails_style_guide.md#no-callback-side-effects
+```
+
+### 11. Missing Background Jobs
 
 **Red Flag:** Slow operations in request cycle
 
@@ -517,18 +648,26 @@ class ReportsController < ApplicationController
   end
 end
 
-# ✅ PATTERN
+# ✅ PATTERN - Background job enqueued in controller
 class ReportsController < ApplicationController
   def create
-    @report = Report.create!(report_params)
-    @report.generate_later
-    redirect_to @report, notice: "Report is being generated..."
+    @report = Report.new(report_params)
+
+    if @report.save
+      # Enqueue background job in controller
+      ReportGenerationJob.perform_later(@report)
+      redirect_to @report, notice: "Report is being generated..."
+    else
+      render :new, status: :unprocessable_entity
+    end
   end
 end
 
 class Report < ApplicationRecord
-  def generate_later
-    ReportGenerationJob.perform_later(self)
+  # No callbacks for enqueueing jobs!
+  # Business logic methods only
+  def generate_data!
+    # Complex generation logic
   end
 end
 
@@ -545,11 +684,17 @@ end
 
 Refactor to:
 1. Create ReportGenerationJob
-2. Add Report#generate_later method
-3. Call generate_later instead of generate_data! in controller
+2. Enqueue job in CONTROLLER after successful save
+3. NO model callbacks for enqueueing jobs!
 4. Add Turbo Stream to update UI when complete
 
-Rule: Operations >500ms should be async.
+Controller pattern:
+if @report.save
+  ReportGenerationJob.perform_later(@report)
+  redirect_to @report, notice: "Generating..."
+end
+
+Rule: Operations >500ms should be async, enqueued from CONTROLLER.
 
 See: rails_style_guide.md#background-jobs
 ```

@@ -34,6 +34,7 @@ Inspired by the [37signals/DHH coding style guide](https://gist.github.com/marck
 - **Everything is CRUD** - New resource over new action
 - **State as records** - Not boolean columns (e.g., `Closure` model instead of `closed: true`)
 - **Concerns for composition** - Horizontal behavior sharing (e.g., `Closeable`, `Watchable`)
+- **No callback side effects** - Side effects (emails, notifications) in controllers, not model callbacks
 - **Minimal dependencies** - Build it yourself before reaching for gems
 - **Database-backed everything** - No Redis, Solid Queue/Cache/Cable
 
@@ -121,7 +122,8 @@ Modern Rails architecture with clear separation of concerns, SOLID principles, a
 ### Core Philosophy
 
 - **Thin models & controllers** - Delegate to service/query/presenter objects
-- **Service objects** - Encapsulate business logic with Result pattern
+- **Service objects** - Encapsulate business logic with dry-monads Result pattern
+- **No callback side effects** - Side effects (emails, notifications) in controllers, not model callbacks
 - **Query objects** - Complex queries in dedicated classes (prevents N+1)
 - **Presenters** - View logic separated from models
 - **Form objects** - Multi-model forms

@@ -71,29 +71,36 @@ You are an expert in Rails controller design and HTTP request handling.
 
 Controllers should be **thin** - they orchestrate, they don't implement business logic.
 
-**✅ Good - Thin controller:**
+**✅ Good - Thin controller with explicit side effects:**
 ```ruby
 class EntitiesController < ApplicationController
   def create
     authorize Entity
 
-    result = Entities::CreateService.call(
-      user: current_user,
-      params: entity_params
-    )
+    @entity = Entity.new(entity_params)
+    @entity.user = current_user
 
-    if result.success?
-      redirect_to result.data, notice: "Entity created successfully."
+    if @entity.save
+      # ✅ Handle side effects HERE in the controller after successful save
+      EntityMailer.created(@entity).deliver_later
+      NotificationService.notify_watchers(@entity)
+      Analytics.track_entity_created(@entity)
+
+      redirect_to @entity, notice: "Entity created successfully."
     else
-      @entity = Entity.new(entity_params)
-      @entity.errors.merge!(result.error)
       render :new, status: :unprocessable_entity
     end
+  end
+
+  private
+
+  def entity_params
+    params.require(:entity).permit(:name, :description, :status)
   end
 end
 ```
 
-**❌ Bad - Fat controller:**
+**❌ Bad - Business logic in controller:**
 ```ruby
 class EntitiesController < ApplicationController
   def create
@@ -101,10 +108,11 @@ class EntitiesController < ApplicationController
     @entity.user = current_user
     @entity.status = 'pending'
 
-    # Business logic in controller - BAD!
+    # ❌ Complex business logic in controller - BAD!
     if @entity.save
-      @entity.calculate_metrics
-      @entity.notify_stakeholders
+      # These complex operations should be in service objects or model methods
+      @entity.calculate_metrics  # Complex calculation
+      @entity.notify_stakeholders  # Complex notification logic
       ActivityLog.create!(action: 'entity_created', user: current_user)
       EntityMailer.created(@entity).deliver_later
 
@@ -115,6 +123,8 @@ class EntitiesController < ApplicationController
   end
 end
 ```
+
+**Note:** Simple side effects like sending emails are FINE in controllers. Complex business logic should be in service objects or model methods.
 
 ### RESTful Actions
 
@@ -151,6 +161,256 @@ class RestaurantsController < ApplicationController
   end
 end
 ```
+
+## Handling Side Effects in Controllers
+
+**CRITICAL RULE:** ALL side effects (emails, notifications, API calls, background jobs) belong in the controller AFTER a successful save. NEVER use model callbacks for side effects.
+
+### ✅ Correct Pattern: Side Effects in Controller
+
+```ruby
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+
+    if @user.save
+      # ✅ ALL side effects happen here, after successful save
+      UserMailer.welcome(@user).deliver_later
+      AdminNotifier.new_user_signup(@user).notify
+      SlackNotifier.post_to_channel("New user: #{@user.email}")
+      Analytics.track('user_signed_up', @user.id)
+
+      redirect_to @user, notice: "Welcome to our platform!"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+### ❌ Anti-Pattern: Side Effects in Model Callbacks
+
+```ruby
+# ❌ NEVER DO THIS
+class User < ApplicationRecord
+  after_create :send_welcome_email
+  after_create :notify_admin
+  after_commit :sync_to_crm
+
+  private
+
+  def send_welcome_email
+    UserMailer.welcome(self).deliver_later
+  end
+
+  def notify_admin
+    AdminNotifier.new_user_signup(self).notify
+  end
+
+  def sync_to_crm
+    CrmSync.sync_user(self)
+  end
+end
+
+# Why this is bad:
+# 1. Hidden side effects - not visible when reading controller
+# 2. Hard to test - callbacks fire during every save
+# 3. Bulk operations trigger callbacks for every record
+# 4. Difficult to control when side effects happen
+# 5. Unclear transaction boundaries
+```
+
+### Examples of Side Effects That Belong in Controllers
+
+**Sending Emails:**
+```ruby
+def create
+  @post = current_user.posts.build(post_params)
+
+  if @post.save
+    # Send notification emails
+    @post.subscribers.each do |subscriber|
+      PostMailer.new_post(subscriber, @post).deliver_later
+    end
+
+    redirect_to @post
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+**Making API Calls:**
+```ruby
+def update
+  @order = Order.find(params[:id])
+
+  if @order.update(order_params)
+    # Update external payment system
+    PaymentGateway.update_order(@order) if @order.saved_change_to_status?
+
+    redirect_to @order, notice: "Order updated"
+  else
+    render :edit, status: :unprocessable_entity
+  end
+end
+```
+
+**Creating Related Records:**
+```ruby
+def create
+  @project = current_user.projects.build(project_params)
+
+  if @project.save
+    # Create initial activity log
+    ActivityLog.create!(
+      user: current_user,
+      action: "created_project",
+      resource: @project
+    )
+
+    # Add creator as first member
+    @project.memberships.create!(user: current_user, role: "owner")
+
+    redirect_to @project
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+**Broadcasting to ActionCable:**
+```ruby
+def create
+  @comment = @post.comments.build(comment_params)
+  @comment.user = current_user
+
+  if @comment.save
+    # Broadcast to subscribers
+    ActionCable.server.broadcast(
+      "post_#{@post.id}_comments",
+      comment: render_to_string(partial: "comments/comment", locals: { comment: @comment })
+    )
+
+    redirect_to @post
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+**Enqueuing Background Jobs:**
+```ruby
+def create
+  @report = current_user.reports.build(report_params)
+
+  if @report.save
+    # Queue background job for processing
+    ReportGenerationJob.perform_later(@report)
+
+    redirect_to @report, notice: "Report is being generated..."
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+### When Side Effects Get Complex: Extract to Service Objects
+
+If side effects become too complex for the controller, extract to a service object:
+
+```ruby
+# app/services/user_signup_service.rb
+class UserSignupService
+  def initialize(user)
+    @user = user
+  end
+
+  def call
+    send_welcome_email
+    notify_admin
+    create_initial_preferences
+    track_analytics
+  end
+
+  private
+
+  def send_welcome_email
+    UserMailer.welcome(@user).deliver_later
+  end
+
+  def notify_admin
+    AdminNotifier.new_user_signup(@user).notify
+  end
+
+  def create_initial_preferences
+    @user.create_preference!(theme: "light", notifications: true)
+  end
+
+  def track_analytics
+    Analytics.track('user_signed_up', @user.id)
+  end
+end
+
+# Controller uses service
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+
+    if @user.save
+      # Service handles all side effects
+      UserSignupService.new(@user).call
+      redirect_to @user, notice: "Welcome!"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+### Testing Controllers with Side Effects
+
+```ruby
+# spec/requests/users_spec.rb
+require 'rails_helper'
+
+RSpec.describe "Users", type: :request do
+  describe "POST /users" do
+    let(:valid_params) { { user: { name: "John", email: "john@example.com" } } }
+
+    it "creates user and sends welcome email" do
+      expect {
+        post users_path, params: valid_params
+      }.to change(User, :count).by(1)
+        .and have_enqueued_mail(UserMailer, :welcome)
+    end
+
+    it "creates user and notifies admin" do
+      allow(AdminNotifier).to receive(:new_user_signup)
+
+      post users_path, params: valid_params
+
+      expect(AdminNotifier).to have_received(:new_user_signup)
+    end
+
+    it "tracks analytics event" do
+      allow(Analytics).to receive(:track)
+
+      post users_path, params: valid_params
+
+      expect(Analytics).to have_received(:track).with('user_signed_up', User.last.id)
+    end
+  end
+end
+```
+
+### Key Takeaways
+
+1. **Models handle data, controllers handle side effects**
+2. **Side effects should be explicit, not hidden in callbacks**
+3. **Test side effects in controller specs, not model specs**
+4. **Extract complex side effects to service objects**
+5. **NEVER use `after_create`, `after_save`, `after_commit` for side effects**
 
 ## Controller Structure
 

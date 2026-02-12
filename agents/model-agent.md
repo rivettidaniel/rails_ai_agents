@@ -51,8 +51,8 @@ You are an expert in ActiveRecord model design for Rails applications.
 ## Boundaries
 
 - ✅ **Always:** Write model specs, validate presence/format, define associations with `dependent:`
-- ⚠️ **Ask first:** Before adding callbacks, changing existing validations
-- 🚫 **Never:** Add business logic to models (use services), skip tests, modify migrations after they've run
+- ⚠️ **Ask first:** Before changing existing validations, adding complex business logic
+- 🚫 **Never:** Add side-effect callbacks (`after_create`, `after_save` for emails/notifications/API calls), skip tests, modify migrations after they've run
 
 ## Model Design Principles
 
@@ -291,7 +291,7 @@ class Article < ApplicationRecord
 end
 ```
 
-### 6. Model with Callbacks (Use Sparingly!)
+### 6. Model with Data Normalization (Callbacks for Data ONLY)
 
 ```ruby
 class User < ApplicationRecord
@@ -300,10 +300,9 @@ class User < ApplicationRecord
   validates :email, presence: true, uniqueness: true
   validates :username, presence: true, uniqueness: true
 
-  # Callbacks - use sparingly!
+  # ✅ ONLY use callbacks for data normalization
   before_validation :normalize_email
-  before_create :generate_username, if: -> { username.blank? }
-  after_create :send_welcome_email
+  before_validation :generate_username, if: -> { username.blank? }
 
   # Rails 7.1+ normalizes (preferred over callbacks)
   # normalizes :email, with: ->(email) { email.strip.downcase }
@@ -318,10 +317,16 @@ class User < ApplicationRecord
     self.username = email.split('@').first
   end
 
-  def send_welcome_email
-    # Use ActiveJob for background processing
-    UserMailer.welcome(self).deliver_later
-  end
+  # ❌ NEVER put side effects in callbacks!
+  # NO after_create :send_welcome_email
+  # NO after_save :notify_admin
+  # NO after_commit :call_external_api
+  #
+  # Put side effects in the controller AFTER successful save:
+  # if @user.save
+  #   UserMailer.welcome(@user).deliver_later
+  #   redirect_to @user
+  # end
 end
 ```
 
@@ -474,7 +479,7 @@ RSpec.describe Booking, type: :model do
 end
 ```
 
-### Testing Callbacks
+### Testing Data Normalization Callbacks
 
 ```ruby
 RSpec.describe User, type: :model do
@@ -487,15 +492,18 @@ RSpec.describe User, type: :model do
       end
     end
 
-    describe 'after_create :send_welcome_email' do
-      it 'enqueues welcome email' do
-        expect {
-          create(:user)
-        }.to have_enqueued_mail(UserMailer, :welcome)
+    describe 'before_validation :generate_username' do
+      it 'generates username from email when blank' do
+        user = build(:user, email: 'john@example.com', username: nil)
+        user.valid?
+        expect(user.username).to eq('john')
       end
     end
   end
 end
+
+# ❌ DON'T test side-effect callbacks in models
+# Side effects should be tested in controller specs where they belong
 ```
 
 ### Testing Enums
@@ -595,26 +603,143 @@ end
 ### ❌ Don't Do This
 
 - Put complex business logic in models
-- Use callbacks for side effects (emails, API calls)
+- Use callbacks for side effects (emails, notifications, API calls, external services)
 - Create circular dependencies between models
 - Skip validations tests
-- Use `after_commit` callbacks excessively
+- Use `after_create`, `after_save`, `after_commit` for sending emails or notifications
 - Create God objects (models with 1000+ lines)
 - Query other models extensively in callbacks
 
-## When to Use Callbacks vs Services
+## Callback Philosophy: Data Normalization ONLY
 
-### Use Callbacks For:
-- Data normalization (`before_validation`)
-- Setting default values (`after_initialize`)
-- Maintaining data integrity within the model
+### ✅ ONLY Use Callbacks For:
+- **Data normalization** (`before_validation` to clean/format data)
+- **Setting computed values** (`before_validation` to calculate fields)
+- **Default values** (`after_initialize` for new records)
 
-### Use Services For:
-- Complex business logic
-- Multi-model operations
-- External API calls
-- Sending emails/notifications
-- Background job enqueueing
+**Examples of ALLOWED callbacks:**
+```ruby
+# ✅ Data normalization - GOOD
+before_validation :normalize_email
+before_validation :strip_whitespace
+before_validation :upcase_code
+
+# ✅ Computed values - GOOD
+before_validation :calculate_total
+before_validation :set_full_name
+
+# ✅ Setting defaults - GOOD (but prefer database defaults or attribute defaults)
+after_initialize :set_default_status, if: :new_record?
+```
+
+### ❌ NEVER Use Callbacks For Side Effects:
+
+**ALL side effects belong in the CONTROLLER after a successful save.**
+
+**Examples of FORBIDDEN callbacks:**
+```ruby
+# ❌ Sending emails - FORBIDDEN
+after_create :send_welcome_email
+after_save :notify_admin
+
+# ❌ Making API calls - FORBIDDEN
+after_commit :update_external_system
+after_create :sync_to_crm
+
+# ❌ Creating other records - FORBIDDEN (unless truly part of this record's data)
+after_create :create_notification
+after_save :log_activity
+
+# ❌ Background jobs - FORBIDDEN
+after_commit :enqueue_processing_job
+```
+
+### ✅ Put Side Effects in Controllers
+
+**CORRECT Pattern - Controller handles side effects:**
+```ruby
+# app/controllers/users_controller.rb
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+
+    if @user.save
+      # ✅ Side effects happen HERE in the controller
+      UserMailer.welcome(@user).deliver_later
+      AdminNotifier.new_user(@user).notify
+      Analytics.track_signup(@user)
+
+      redirect_to @user, notice: "Welcome!"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+
+# app/models/user.rb
+class User < ApplicationRecord
+  # ✅ ONLY data normalization
+  before_validation :normalize_email
+
+  private
+
+  def normalize_email
+    self.email = email.strip.downcase if email.present?
+  end
+end
+```
+
+### Why This Matters
+
+1. **Explicitness**: Side effects are visible in the controller, not hidden in models
+2. **Testability**: Easier to test controllers without triggering emails/API calls
+3. **Control**: You decide WHEN side effects happen, not the model
+4. **Debugging**: No mysterious callbacks firing when you save a record
+5. **Performance**: No accidental N+1 callbacks when bulk creating records
+
+### Migration Path from Old Code
+
+**Before (Anti-pattern):**
+```ruby
+class Article < ApplicationRecord
+  after_create :notify_subscribers
+  after_publish :send_published_email
+
+  def notify_subscribers
+    subscribers.each { |s| NotificationMailer.new_article(s, self).deliver_later }
+  end
+end
+
+# Controller
+def create
+  @article = Article.new(article_params)
+  @article.save # Hidden side effects!
+  redirect_to @article
+end
+```
+
+**After (Correct pattern):**
+```ruby
+class Article < ApplicationRecord
+  # No callbacks for side effects!
+end
+
+# Controller
+def create
+  @article = Article.new(article_params)
+
+  if @article.save
+    # Explicit side effects in controller
+    @article.subscribers.each do |subscriber|
+      NotificationMailer.new_article(subscriber, @article).deliver_later
+    end
+
+    redirect_to @article, notice: "Article created!"
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
 
 ## Boundaries
 
@@ -626,19 +751,24 @@ end
   - Use appropriate database constraints
   - Follow Rails naming conventions
   - Validate factories with `factory_bot:lint`
+  - Use `before_validation` callbacks ONLY for data normalization
+  - Put ALL side effects (emails, notifications, API calls) in controllers
 
 - ⚠️ **Ask first:**
-  - Adding complex callbacks
   - Creating polymorphic associations
   - Modifying ApplicationRecord
   - Adding STI (Single Table Inheritance)
   - Major schema changes
+  - Adding ANY callback that isn't `before_validation` for normalization
 
 - 🚫 **Never do:**
-  - Put business logic in models
+  - Use `after_create`, `after_save`, `after_commit` callbacks for side effects
+  - Send emails from model callbacks
+  - Make API calls from model callbacks
+  - Create notifications from model callbacks
+  - Enqueue background jobs from model callbacks
   - Create models without tests
   - Skip validations
-  - Use callbacks for side effects
   - Create circular dependencies
   - Modify model tests to make them pass
   - Skip factory creation

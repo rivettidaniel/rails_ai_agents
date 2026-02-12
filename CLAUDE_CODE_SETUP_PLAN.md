@@ -277,12 +277,20 @@ kamal app logs         # View production logs
 - Use before_action for auth/setup
 - Respond with Turbo Streams for dynamic updates
 - Use strong parameters
+- **Handle ALL side effects (emails, notifications, jobs) in controller after successful save**
 
 ```ruby
-# Good
+# ✅ Good - Side effects explicit in controller
 def create
   @post = Post.new(post_params)
+  @post.user = current_user
+
   if @post.save
+    # All side effects here in controller
+    PostMailer.published(@post).deliver_later
+    NotificationService.notify_followers(@post)
+    SearchIndexJob.perform_later(@post)
+
     redirect_to @post, notice: "Created!"
   else
     render :new, status: :unprocessable_entity
@@ -294,6 +302,13 @@ private
 def post_params
   params.require(:post).permit(:title, :body)
 end
+
+# ❌ Bad - Hidden side effects in model callbacks
+# def create
+#   @post = Post.new(post_params)
+#   @post.save  # What happens? Email sent? Index updated? Who knows!
+#   redirect_to @post
+# end
 ```
 
 ### Models
@@ -301,7 +316,8 @@ end
 - Associations after validations
 - Scopes before methods
 - Extract complex queries to scopes
-- Use callbacks sparingly
+- **ONLY use `before_validation` callbacks for data normalization**
+- **NEVER use callbacks for side effects (emails, notifications, API calls)**
 
 ```ruby
 class Post < ApplicationRecord
@@ -317,10 +333,25 @@ class Post < ApplicationRecord
   scope :published, -> { where(published: true) }
   scope :recent, -> { order(created_at: :desc) }
 
+  # ✅ ONLY callbacks for data normalization
+  before_validation :normalize_title
+
   # Methods
   def publish!
     update!(published: true, published_at: Time.current)
   end
+
+  private
+
+  def normalize_title
+    self.title = title.strip if title.present?
+  end
+
+  # ❌ NO callbacks for side effects!
+  # NO after_create :send_notification
+  # NO after_save :update_search_index
+  # NO after_commit :broadcast_changes
+  # Put these in the CONTROLLER after successful save
 end
 ```
 

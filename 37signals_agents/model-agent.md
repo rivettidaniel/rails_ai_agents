@@ -102,10 +102,9 @@ class Card < ApplicationRecord
   delegate :name, to: :board, prefix: true, allow_nil: true
   delegate :can_administer_card?, to: :board, prefix: false
 
-  # Callbacks
-  after_create_commit :broadcast_creation
-  after_update_commit :broadcast_update
-  after_destroy_commit :broadcast_removal
+  # ❌ NO CALLBACKS for side effects!
+  # Broadcasting, notifications, emails belong in CONTROLLERS
+  # Only use before_validation for data normalization
 
   # Business logic methods
   def publish
@@ -145,14 +144,14 @@ class Closure < ApplicationRecord
 
   validates :card, uniqueness: true
 
-  after_create_commit :notify_watchers
-  after_destroy_commit :notify_watchers
-
-  private
-
-  def notify_watchers
-    card.notify_watchers_later
-  end
+  # ❌ NO callbacks for notifications!
+  # Notifications belong in the controller:
+  #
+  # def create
+  #   @closure = @card.create_closure!(user: current_user)
+  #   NotifyWatchersJob.perform_later(@card)
+  #   redirect_to @card
+  # end
 end
 ```
 
@@ -167,22 +166,15 @@ class Assignment < ApplicationRecord
 
   validates :user_id, uniqueness: { scope: :card_id }
 
-  after_create_commit :track_assignment_created
-  after_destroy_commit :track_assignment_destroyed
-
-  def notify_assignee
-    AssignmentMailer.assigned(self).deliver_later
-  end
-
-  private
-
-  def track_assignment_created
-    card.track_event "card_assigned", user: user, particulars: { assignee_id: user.id }
-  end
-
-  def track_assignment_destroyed
-    card.track_event "card_unassigned", user: user, particulars: { assignee_id: user.id }
-  end
+  # ❌ NO callbacks for tracking, notifications, or emails!
+  # Handle in controller:
+  #
+  # def create
+  #   @assignment = @card.assignments.create!(user: user)
+  #   card.track_event "card_assigned", user: current_user
+  #   AssignmentMailer.assigned(@assignment).deliver_later
+  #   redirect_to @card
+  # end
 end
 ```
 
@@ -202,32 +194,36 @@ class Comment < ApplicationRecord
   scope :recent, -> { order(created_at: :desc) }
   scope :by_creator, ->(user) { where(creator: user) }
 
-  after_create_commit :notify_recipients
-  after_create_commit :broadcast_creation
+  # ❌ NO callbacks for notifications or broadcasting!
+  # Business logic can stay in model methods, but call them from CONTROLLER
 
-  def notify_recipients_later
-    NotifyRecipientsJob.perform_later(self)
+  # ✅ Business logic method (called explicitly from controller)
+  def recipients
+    (card.watchers + card.assignees + [card.creator])
+      .uniq
+      .reject { |r| r == creator }
   end
 
-  def notify_recipients
-    # Business logic for who gets notified
-    recipients = card.watchers + card.assignees + [card.creator]
-    recipients.uniq.each do |recipient|
-      next if recipient == creator
-
-      Notification.create!(
-        recipient: recipient,
-        notifiable: self,
-        action: "comment_created"
-      )
-    end
-  end
-
-  private
-
-  def broadcast_creation
-    broadcast_prepend_to card, :comments
-  end
+  # Controller handles side effects:
+  #
+  # def create
+  #   @comment = @card.comments.build(comment_params)
+  #   @comment.creator = current_user
+  #
+  #   if @comment.save
+  #     # Notify recipients
+  #     @comment.recipients.each do |recipient|
+  #       Notification.create!(recipient: recipient, notifiable: @comment, action: "comment_created")
+  #     end
+  #
+  #     # Broadcast to Turbo Stream
+  #     broadcast_prepend_to @card, :comments, target: "comments", partial: "comments/comment"
+  #
+  #     redirect_to @card
+  #   else
+  #     render :new, status: :unprocessable_entity
+  #   end
+  # end
 end
 ```
 
@@ -395,39 +391,93 @@ def ensure_same_account
 end
 ```
 
-## Callback patterns
+## Callback Philosophy: Data Normalization ONLY
 
-### Use callbacks sparingly
-
-```ruby
-# ✅ Good: Broadcasting and tracking
-after_create_commit :broadcast_creation
-after_create_commit :track_created_event
-
-# ✅ Good: Setting defaults
-before_validation :set_default_status, on: :create
-
-# ⚠️ Use with caution: Side effects
-after_create_commit :notify_recipients
-
-# ❌ Avoid: Complex business logic
-# Put complex logic in explicit methods instead
-```
-
-### Callback timing
+### ✅ ONLY Use Callbacks For Data Normalization
 
 ```ruby
-# Before validation
+# ✅ GOOD: Data normalization
 before_validation :normalize_email
+before_validation :strip_whitespace
+before_validation :upcase_code
 
-# After commit (for external side effects)
-after_create_commit :send_notifications
-after_update_commit :broadcast_update
-after_destroy_commit :cleanup_related_records
+# ✅ GOOD: Computing derived values
+before_validation :calculate_total
+before_validation :set_slug_from_title
 
-# Use _commit callbacks for anything that hits external services
-# Regular callbacks can rollback with the transaction
+# ✅ GOOD: Setting defaults (but prefer attribute defaults)
+after_initialize :set_default_status, if: :new_record?
 ```
+
+### ❌ NEVER Use Callbacks For Side Effects
+
+```ruby
+# ❌ FORBIDDEN: Notifications
+# after_create_commit :send_notifications
+# after_create_commit :notify_team
+# after_commit :notify_recipients
+
+# ❌ FORBIDDEN: Broadcasting
+# after_create_commit :broadcast_creation
+# after_update_commit :broadcast_update
+# after_destroy_commit :broadcast_removal
+
+# ❌ FORBIDDEN: Event tracking
+# after_create_commit :track_created_event
+# after_save :log_changes
+
+# ❌ FORBIDDEN: Background jobs
+# after_commit :enqueue_processing
+# after_create :schedule_work
+
+# ❌ FORBIDDEN: API calls
+# after_save :sync_to_external_system
+# after_commit :update_search_index
+
+# ALL of these belong in the CONTROLLER after successful save!
+```
+
+### Correct Pattern: Side Effects in Controller
+
+```ruby
+# Model: Data normalization only
+class Card < ApplicationRecord
+  before_validation :normalize_title
+
+  private
+
+  def normalize_title
+    self.title = title.strip if title.present?
+  end
+end
+
+# Controller: Side effects after save
+class CardsController < ApplicationController
+  def create
+    @card = @board.cards.build(card_params)
+
+    if @card.save
+      # All side effects here in the controller
+      NotificationMailer.card_created(@card).deliver_later
+      broadcast_prepend_to @board, :cards, target: "cards"
+      @card.track_event "card_created", user: current_user
+      SearchIndexJob.perform_later(@card)
+
+      redirect_to @card
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+### Why This Matters
+
+1. **Explicit is better than implicit** - Side effects are visible, not hidden
+2. **Easier testing** - No need to stub callbacks in model tests
+3. **Better control** - You decide when side effects happen
+4. **No surprises** - Bulk operations don't trigger unexpected side effects
+5. **Clear transaction boundaries** - Side effects happen after commit
 
 ## Enum patterns
 
@@ -536,27 +586,48 @@ def total_comments
 end
 ```
 
-## _later and _now convention
+## Business Logic Methods (Called from Controllers)
+
+Business logic belongs in models, but is called explicitly from controllers:
 
 ```ruby
-# Async version (queues a job)
-def notify_recipients_later
-  NotifyRecipientsJob.perform_later(self)
-end
+# Model: Business logic methods
+class Card < ApplicationRecord
+  # ✅ Query method - who should be notified?
+  def notification_recipients
+    (watchers + assignees + [creator]).uniq
+  end
 
-# Sync version (immediate execution)
-def notify_recipients_now
-  recipients.each do |recipient|
-    Notification.create!(recipient: recipient, notifiable: self)
+  # ✅ Business logic - what metadata to track?
+  def event_metadata
+    {
+      title: title,
+      column_id: column_id,
+      assignee_ids: assignees.pluck(:id)
+    }
   end
 end
 
-# Default to sync, call _later from callbacks
-def notify_recipients
-  notify_recipients_now
-end
+# Controller: Calls business logic, handles side effects
+class CardsController < ApplicationController
+  def create
+    @card = @board.cards.build(card_params)
 
-after_create_commit :notify_recipients_later
+    if @card.save
+      # Use model's business logic
+      @card.notification_recipients.each do |recipient|
+        NotificationMailer.card_created(recipient, @card).deliver_later
+      end
+
+      # Track with metadata from model
+      EventTracker.track("card_created", @card.event_metadata)
+
+      redirect_to @card
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
 ```
 
 ## Using Current for context
@@ -709,6 +780,34 @@ end
 
 ## Boundaries
 
-- ✅ **Always do:** Put business logic in models, use concerns for organization, include tests for all business logic, use bang methods (`create!`, `update!`) in models, leverage associations and scopes, use Current for request context, default values via lambdas
-- ⚠️ **Ask first:** Before creating service objects, before adding complex callbacks, before using inheritance (prefer composition with concerns), before creating form objects
-- 🚫 **Never do:** Create anemic models (just data, no behavior), put business logic in controllers, skip validations, use magic numbers (use constants or enums), create models without tests, forget `account_id` on multi-tenant models, use foreign key constraints (explicitly removed)
+- ✅ **Always do:**
+  - Put business logic (queries, calculations, validations) in models
+  - Use concerns for organization
+  - Include tests for all business logic
+  - Use bang methods (`create!`, `update!`) in models
+  - Leverage associations and scopes
+  - Use Current for request context
+  - Default values via lambdas
+  - Use `before_validation` ONLY for data normalization
+  - Put ALL side effects (emails, notifications, broadcasting, jobs) in controllers
+
+- ⚠️ **Ask first:**
+  - Before creating service objects (usually not needed)
+  - Before adding ANY callback other than `before_validation`
+  - Before using inheritance (prefer composition with concerns)
+  - Before creating form objects
+
+- 🚫 **Never do:**
+  - Use `after_create`, `after_save`, `after_commit` for side effects
+  - Send emails from model callbacks
+  - Make API calls from model callbacks
+  - Broadcast from model callbacks
+  - Enqueue jobs from model callbacks
+  - Create notifications from model callbacks
+  - Create anemic models (just data, no behavior)
+  - Put business logic in controllers (queries/calculations belong in models)
+  - Skip validations
+  - Use magic numbers (use constants or enums)
+  - Create models without tests
+  - Forget `account_id` on multi-tenant models
+  - Use foreign key constraints (explicitly removed in this style)
