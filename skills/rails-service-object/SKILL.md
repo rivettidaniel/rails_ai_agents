@@ -149,6 +149,8 @@ Location: `app/services/orders/create_service.rb`
 
 module Orders
   class CreateService
+    include Dry::Monads[:result]
+
     def initialize(inventory_service: InventoryService.new,
                    payment_gateway: PaymentGateway.new)
       @inventory_service = inventory_service
@@ -156,17 +158,17 @@ module Orders
     end
 
     def call(user:, items:, payment_method_id: nil)
-      return failure('No items provided', :empty_items) if items.empty?
-      return failure('Insufficient inventory', :insufficient_inventory) unless inventory_available?(items)
+      return Failure('No items provided') if items.empty?
+      return Failure('Insufficient inventory') unless inventory_available?(items)
 
       order = create_order(user, items)
       process_payment(order, payment_method_id) if payment_method_id
 
-      success(order)
+      Success(order)
     rescue ActiveRecord::RecordInvalid => e
-      failure(e.message, :validation_failed)
+      Failure(e.message)
     rescue PaymentError => e
-      failure(e.message, :payment_failed)
+      Failure(e.message)
     end
 
     private
@@ -202,50 +204,43 @@ module Orders
       )
       order.update!(status: :paid)
     end
-
-    def success(data)
-      Result.new(success: true, data: data)
-    end
-
-    def failure(error, code = :unknown)
-      Result.new(success: false, error: error, code: code)
-    end
   end
 end
 ```
 
-## Result Object
+## dry-monads Result
 
-Create a reusable Result class:
+Using **dry-monads** for Result objects:
+
+**Installation:**
+
+Add to `Gemfile`:
+```ruby
+gem 'dry-monads', '~> 1.6'
+```
+
+Then run: `bundle install`
+
+**Usage:**
 
 ```ruby
-# app/services/result.rb
-# frozen_string_literal: true
+# app/services/application_service.rb
+class ApplicationService
+  include Dry::Monads[:result]
 
-class Result
-  attr_reader :data, :error, :code
-
-  def initialize(success:, data: nil, error: nil, code: nil)
-    @success = success
-    @data = data
-    @error = error
-    @code = code
-  end
-
-  def success?
-    @success
-  end
-
-  def failure?
-    !@success
-  end
-
-  # Allow pattern matching (Ruby 3+)
-  def deconstruct_keys(keys)
-    { success: @success, data: @data, error: @error, code: @code }
+  def self.call(...)
+    new(...).call
   end
 end
 ```
+
+All services inherit from `ApplicationService` and use:
+- `Success(data)` - Returns successful result
+- `Failure(error)` - Returns failure result
+- `.success?` - Check if successful
+- `.failure?` - Check if failed
+- `.value!` - Unwrap value (raises on Failure)
+- `.value_or(default)` - Get value or default
 
 ## Calling Services
 
@@ -261,10 +256,23 @@ class OrdersController < ApplicationController
     )
 
     if result.success?
-      render json: result.data, status: :created
+      render json: result.value!, status: :created
     else
-      render json: { error: result.error }, status: :unprocessable_entity
+      render json: { error: result.failure }, status: :unprocessable_entity
     end
+  end
+end
+```
+
+### Pattern Matching (Ruby 3+)
+
+```ruby
+def create
+  case Orders::CreateService.new.call(user: current_user, items: order_params[:items])
+  in Dry::Monads::Success(order)
+    render json: order, status: :created
+  in Dry::Monads::Failure(error)
+    render json: { error: error }, status: :unprocessable_entity
   end
 end
 ```
@@ -307,8 +315,7 @@ end
 
 ```
 app/services/
-├── result.rb                    # Shared Result class
-├── application_service.rb       # Optional base class
+├── application_service.rb       # Base class with dry-monads
 ├── orders/
 │   ├── create_service.rb
 │   ├── cancel_service.rb
@@ -326,14 +333,16 @@ app/services/
 1. **Naming**: `VerbNounService` (e.g., `CreateOrderService`)
 2. **Location**: `app/services/[namespace]/[name]_service.rb`
 3. **Interface**: Single public method `#call`
-4. **Return**: Always return Result object
+4. **Return**: Always return `Success(data)` or `Failure(error)`
 5. **Dependencies**: Inject via constructor
-6. **Errors**: Catch and wrap, don't raise
+6. **Errors**: Catch and wrap in `Failure`, don't raise
+7. **Monads**: Include `Dry::Monads[:result]` in ApplicationService
 
 ## Anti-Patterns to Avoid
 
 1. **God service**: Too many responsibilities
 2. **Hidden dependencies**: Using globals instead of injection
-3. **No return contract**: Returning different types
-4. **Raising exceptions**: Use Result objects instead
+3. **No return contract**: Always return Success/Failure
+4. **Raising exceptions**: Wrap in Failure instead
 5. **Business logic in controller**: Extract to service
+6. **Not using dry-monads**: Use Success/Failure consistently

@@ -191,7 +191,8 @@ Modern Rails architecture with clear separation of concerns, SOLID principles, a
 module Users
   class CreateService < ApplicationService
     def call
-      # Returns Result.new(success:, data:, error:)
+      # Returns Success(data) or Failure(error)
+      # Uses dry-monads for Result handling
     end
   end
 end
@@ -204,7 +205,7 @@ def create
   result = Users::CreateService.call(params: user_params)
 
   if result.success?
-    redirect_to result.data
+    redirect_to result.value!
   else
     render :new, status: :unprocessable_entity
   end
@@ -364,6 +365,7 @@ All agents follow best practices from GitHub's analysis:
 - Tailwind CSS
 - Solid Queue
 - Pundit
+- **dry-monads** (Result monad for service objects)
 - RSpec + FactoryBot
 
 ---

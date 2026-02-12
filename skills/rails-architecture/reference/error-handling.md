@@ -1,84 +1,81 @@
 # Error Handling Strategies
 
-## Result Object Pattern (Preferred)
+## dry-monads Result Pattern (Preferred)
 
-Services return Result objects instead of raising exceptions:
+Services use **dry-monads** for Result handling:
+
+**Installation:**
+
+Add to `Gemfile`:
+```ruby
+gem 'dry-monads', '~> 1.6'
+```
+
+**Base Service:**
 
 ```ruby
-# app/services/result.rb
-class Result
-  attr_reader :data, :error, :code
+# app/services/application_service.rb
+class ApplicationService
+  include Dry::Monads[:result]
 
-  def initialize(success:, data: nil, error: nil, code: nil)
-    @success = success
-    @data = data
-    @error = error
-    @code = code
-  end
-
-  def success? = @success
-  def failure? = !@success
-
-  # Pattern matching support (Ruby 3+)
-  def deconstruct_keys(keys)
-    { success: @success, data: @data, error: @error, code: @code }
+  def self.call(...)
+    new(...).call
   end
 end
 ```
 
-## Error Code System
+All services return:
+- `Success(data)` for successful operations
+- `Failure(error)` for failures
 
-### Define Error Codes
+Check results with `.success?` and `.failure?`
+Extract values with `.value!` or `.value_or(default)`
+
+## Error Handling Approaches
+
+### Simple String Messages
 
 ```ruby
 module Orders
   class CreateService
-    ERROR_CODES = {
-      empty_cart: :empty_cart,
-      out_of_stock: :out_of_stock,
-      payment_declined: :payment_declined,
-      invalid_coupon: :invalid_coupon,
-      validation_failed: :validation_failed
-    }.freeze
+    include Dry::Monads[:result]
 
-    MESSAGES = {
-      empty_cart: "Your cart is empty",
-      out_of_stock: "One or more items are out of stock",
-      payment_declined: "Your payment was declined",
-      invalid_coupon: "The coupon code is invalid",
-      validation_failed: "Please check your order details"
-    }.freeze
+    def call(params)
+      return Failure("Your cart is empty") if params[:items].empty?
+      return Failure("Item out of stock") unless inventory_available?(params[:items])
+
+      order = create_order(params)
+      Success(order)
+    rescue PaymentGateway::Declined => e
+      Failure("Payment declined: #{e.message}")
+    rescue ActiveRecord::RecordInvalid => e
+      Failure("Validation failed: #{e.message}")
+    end
   end
 end
 ```
 
-### Return Typed Errors
+### Structured Error Hashes
+
+For programmatic error handling:
 
 ```ruby
 def call(params)
-  return error(:empty_cart) if params[:items].empty?
-  return error(:out_of_stock) unless inventory_available?(params[:items])
+  return Failure(code: :empty_cart, message: "Your cart is empty") if params[:items].empty?
+  return Failure(code: :out_of_stock, message: "Item unavailable") unless inventory_available?(params[:items])
 
   order = create_order(params)
-  success(order)
-rescue PaymentGateway::Declined
-  error(:payment_declined)
+  Success(order)
+rescue PaymentGateway::Declined => e
+  Failure(code: :payment_declined, message: e.message)
 rescue ActiveRecord::RecordInvalid => e
-  error(:validation_failed, e.message)
-end
-
-private
-
-def error(code, details = nil)
-  message = self.class::MESSAGES[code]
-  message = "#{message}: #{details}" if details
-  Result.new(success: false, error: message, code: code)
+  Failure(code: :validation_failed, message: e.message, details: e.record.errors.to_hash)
 end
 ```
 
 ## Controller Error Handling
 
-### Handle by Error Code
+### Simple Handling
 
 ```ruby
 class OrdersController < ApplicationController
@@ -86,26 +83,42 @@ class OrdersController < ApplicationController
     result = Orders::CreateService.new.call(order_params)
 
     if result.success?
-      redirect_to result.data, notice: t(".success")
+      redirect_to result.value!, notice: "Order created"
     else
-      handle_error(result)
+      flash.now[:alert] = result.failure
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+```
+
+### Structured Error Handling
+
+```ruby
+class OrdersController < ApplicationController
+  def create
+    result = Orders::CreateService.new.call(order_params)
+
+    if result.success?
+      redirect_to result.value!, notice: "Order created"
+    else
+      handle_error(result.failure)
     end
   end
 
   private
 
-  def handle_error(result)
-    case result.code
+  def handle_error(error)
+    case error[:code]
     when :empty_cart
-      redirect_to cart_path, alert: result.error
+      redirect_to cart_path, alert: error[:message]
     when :out_of_stock
-      flash.now[:alert] = result.error
-      @out_of_stock = true
+      flash.now[:alert] = error[:message]
       render :new, status: :unprocessable_entity
     when :payment_declined
-      redirect_to payment_path, alert: result.error
+      redirect_to payment_path, alert: error[:message]
     else
-      flash.now[:alert] = result.error
+      flash.now[:alert] = error[:message] || error
       render :new, status: :unprocessable_entity
     end
   end
@@ -117,13 +130,13 @@ end
 ```ruby
 def create
   case Orders::CreateService.new.call(order_params)
-  in { success: true, data: order }
-    redirect_to order, notice: t(".success")
-  in { code: :empty_cart }
-    redirect_to cart_path, alert: t(".empty_cart")
-  in { code: :payment_declined, error: message }
-    redirect_to payment_path, alert: message
-  in { error: message }
+  in Dry::Monads::Success(order)
+    redirect_to order, notice: "Order created"
+  in Dry::Monads::Failure(code: :empty_cart, message: msg)
+    redirect_to cart_path, alert: msg
+  in Dry::Monads::Failure(code: :payment_declined, message: msg)
+    redirect_to payment_path, alert: msg
+  in Dry::Monads::Failure(message)
     flash.now[:alert] = message
     render :new, status: :unprocessable_entity
   end
@@ -140,18 +153,15 @@ module Api
   class BaseController < ApplicationController
     private
 
-    def render_error(result, status: :unprocessable_entity)
-      render json: {
-        error: {
-          code: result.code,
-          message: result.error,
-          details: result.data # Optional additional context
-        }
-      }, status: status
-    end
-
-    def render_success(data, status: :ok)
-      render json: { data: data }, status: status
+    def render_service_result(result, status_success: :ok, status_failure: :unprocessable_entity)
+      if result.success?
+        render json: { data: result.value! }, status: status_success
+      else
+        error = result.failure
+        render json: {
+          error: error.is_a?(Hash) ? error : { message: error }
+        }, status: status_failure
+      end
     end
   end
 end
@@ -185,15 +195,17 @@ end
 
 ```ruby
 class ExternalApiService
+  include Dry::Monads[:result]
+
   def call(params)
     response = client.request(params)
-    success(response.data)
+    Success(response.data)
   rescue Faraday::TimeoutError
-    error(:timeout, "External service timed out")
+    Failure("External service timed out")
   rescue Faraday::ConnectionFailed
-    error(:connection_failed, "Could not connect to service")
+    Failure("Could not connect to service")
   rescue JSON::ParserError
-    error(:invalid_response, "Invalid response from service")
+    Failure("Invalid response from service")
   end
 end
 ```
@@ -246,24 +258,35 @@ end
 
 ### Model Validations to Result
 
+**Simple version:**
+
 ```ruby
 def call(params)
   record = Model.new(params)
 
   if record.save
-    success(record)
+    Success(record)
   else
-    validation_error(record)
+    Failure(record.errors.full_messages.join(", "))
   end
 end
+```
 
-def validation_error(record)
-  Result.new(
-    success: false,
-    error: record.errors.full_messages.join(", "),
-    code: :validation_failed,
-    data: record.errors.to_hash
-  )
+**Structured version:**
+
+```ruby
+def call(params)
+  record = Model.new(params)
+
+  if record.save
+    Success(record)
+  else
+    Failure(
+      code: :validation_failed,
+      message: record.errors.full_messages.join(", "),
+      details: record.errors.to_hash
+    )
+  end
 end
 ```
 
@@ -271,8 +294,11 @@ end
 
 ```ruby
 # In controller
-if result.failure? && result.code == :validation_failed
-  @errors = result.data # Hash of field => [messages]
+if result.failure?
+  error = result.failure
+  if error.is_a?(Hash) && error[:details]
+    @errors = error[:details] # Hash of field => [messages]
+  end
 end
 
 # In view
@@ -285,22 +311,28 @@ end
 
 ```ruby
 class ApplicationService
+  include Dry::Monads[:result]
+
   private
 
-  def error(code, message = nil, exception: nil)
-    log_error(code, message, exception)
-    Result.new(success: false, error: message || default_message(code), code: code)
-  end
-
-  def log_error(code, message, exception)
+  def log_and_fail(message, exception: nil)
     Rails.logger.error({
       service: self.class.name,
-      error_code: code,
       message: message,
       exception: exception&.class&.name,
       backtrace: exception&.backtrace&.first(5)
     }.to_json)
+
+    Failure(message)
   end
+end
+
+# Usage:
+def call(params)
+  do_something
+  Success(result)
+rescue SomeError => e
+  log_and_fail("Operation failed", exception: e)
 end
 ```
 
@@ -308,26 +340,26 @@ end
 
 ```ruby
 # With Sentry/Rollbar
-def error(code, message = nil, exception: nil)
-  if exception && should_report?(code)
-    Sentry.capture_exception(exception, extra: { code: code, message: message })
-  end
-
-  Result.new(success: false, error: message, code: code)
-end
-
-def should_report?(code)
+def call(params)
+  do_something
+  Success(result)
+rescue UnexpectedError => e
+  Sentry.capture_exception(e, extra: { service: self.class.name, params: params })
+  Failure("An unexpected error occurred")
+rescue ExpectedError => e
   # Don't report expected errors
-  ![:validation_failed, :not_found, :unauthorized].include?(code)
+  Failure(e.message)
 end
 ```
 
 ## Checklist
 
-- [ ] Services return Result objects
-- [ ] Error codes are typed symbols
-- [ ] Controllers handle errors by code
+- [ ] Services include `Dry::Monads[:result]`
+- [ ] Services return `Success(data)` or `Failure(error)`
+- [ ] Controllers handle both success and failure cases
 - [ ] API responses have consistent format
 - [ ] Unexpected errors logged with context
 - [ ] Sensitive data not exposed in errors
 - [ ] User-facing messages use I18n
+- [ ] Use `.value!` to unwrap Success (raises on Failure)
+- [ ] Use `.value_or(default)` for safe unwrapping

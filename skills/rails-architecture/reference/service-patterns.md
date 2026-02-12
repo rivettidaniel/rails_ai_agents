@@ -6,29 +6,23 @@
 # app/services/[namespace]/[verb]_service.rb
 module Namespace
   class VerbService
+    include Dry::Monads[:result]
+
     def initialize(dependencies = {})
       @dependency = dependencies[:dependency] || DefaultDependency.new
     end
 
     def call(params)
       validate_input(params)
-      perform_operation(params)
-      success(result)
+      result = perform_operation(params)
+      Success(result)
     rescue StandardError => e
-      failure(e.message)
+      Failure(e.message)
     end
 
     private
 
     attr_reader :dependency
-
-    def success(data)
-      Result.new(success: true, data: data)
-    end
-
-    def failure(error, code = :unknown)
-      Result.new(success: false, error: error, code: code)
-    end
   end
 end
 ```
@@ -43,6 +37,8 @@ Single action that changes state:
 # app/services/orders/create_service.rb
 module Orders
   class CreateService
+    include Dry::Monads[:result]
+
     def call(user:, items:)
       order = nil
 
@@ -53,9 +49,9 @@ module Orders
       end
 
       OrderMailer.confirmation(order).deliver_later
-      success(order)
+      Success(order)
     rescue ActiveRecord::RecordInvalid => e
-      failure(e.message, :validation_error)
+      Failure(e.message)
     end
   end
 end
@@ -69,10 +65,12 @@ Complex reads that don't fit in Query Objects:
 # app/services/reports/generate_service.rb
 module Reports
   class GenerateService
+    include Dry::Monads[:result]
+
     def call(account:, date_range:, format:)
       data = gather_data(account, date_range)
       formatted = format_data(data, format)
-      success(formatted)
+      Success(formatted)
     end
 
     private
@@ -96,6 +94,8 @@ Wrap external service calls:
 # app/services/payments/charge_service.rb
 module Payments
   class ChargeService
+    include Dry::Monads[:result]
+
     def initialize(gateway: StripeGateway.new)
       @gateway = gateway
     end
@@ -112,11 +112,11 @@ module Payments
         payment_reference: charge.id
       )
 
-      success(charge)
+      Success(charge)
     rescue PaymentGateway::CardDeclined => e
-      failure(e.message, :card_declined)
+      Failure(e.message)
     rescue PaymentGateway::Error => e
-      failure(e.message, :payment_error)
+      Failure(e.message)
     end
 
     private
@@ -134,21 +134,40 @@ Coordinate multiple services:
 # app/services/onboarding/complete_service.rb
 module Onboarding
   class CompleteService
+    include Dry::Monads[:result]
+
     def call(user:, params:)
-      results = []
+      Accounts::SetupService.new.call(user: user, params: params[:account])
+        .bind { |_| Preferences::ConfigureService.new.call(user: user, params: params[:preferences]) }
+        .bind { |_| Notifications::WelcomeService.new.call(user: user) }
+        .bind { |_| complete_onboarding(user) }
+    end
 
-      results << Accounts::SetupService.new.call(user: user, params: params[:account])
-      return results.last if results.last.failure?
+    private
 
-      results << Preferences::ConfigureService.new.call(user: user, params: params[:preferences])
-      return results.last if results.last.failure?
-
-      results << Notifications::WelcomeService.new.call(user: user)
-
+    def complete_onboarding(user)
       user.update!(onboarding_completed_at: Time.current)
-      success(user)
+      Success(user)
     end
   end
+end
+```
+
+**Alternative without `.bind` chaining:**
+
+```ruby
+def call(user:, params:)
+  result = Accounts::SetupService.new.call(user: user, params: params[:account])
+  return result if result.failure?
+
+  result = Preferences::ConfigureService.new.call(user: user, params: params[:preferences])
+  return result if result.failure?
+
+  result = Notifications::WelcomeService.new.call(user: user)
+  return result if result.failure?
+
+  user.update!(onboarding_completed_at: Time.current)
+  Success(user)
 end
 ```
 
@@ -188,36 +207,43 @@ end
 
 ## Error Handling Patterns
 
-### Typed Error Codes
+### Simple Error Messages
 
 ```ruby
 module Orders
   class CreateService
-    ERROR_CODES = {
-      empty_cart: "No items in cart",
-      insufficient_inventory: "Item out of stock",
-      payment_failed: "Payment could not be processed",
-      validation_failed: "Invalid order data"
-    }.freeze
+    include Dry::Monads[:result]
 
     def call(params)
-      return failure(:empty_cart) if params[:items].empty?
-      return failure(:insufficient_inventory) unless inventory_available?(params[:items])
+      return Failure("No items in cart") if params[:items].empty?
+      return Failure("Item out of stock") unless inventory_available?(params[:items])
 
       order = create_order(params)
-      success(order)
-    rescue PaymentError
-      failure(:payment_failed)
+      Success(order)
+    rescue PaymentError => e
+      Failure("Payment failed: #{e.message}")
     rescue ActiveRecord::RecordInvalid => e
-      failure(:validation_failed, e.message)
+      Failure("Invalid order: #{e.message}")
     end
+  end
+end
+```
 
-    private
+### Structured Errors (Hash)
 
-    def failure(code, details = nil)
-      message = ERROR_CODES[code]
-      message = "#{message}: #{details}" if details
-      Result.new(success: false, error: message, code: code)
+```ruby
+module Orders
+  class CreateService
+    include Dry::Monads[:result]
+
+    def call(params)
+      return Failure(code: :empty_cart, message: "No items in cart") if params[:items].empty?
+      return Failure(code: :out_of_stock, message: "Item unavailable") unless inventory_available?(params[:items])
+
+      order = create_order(params)
+      Success(order)
+    rescue PaymentError => e
+      Failure(code: :payment_failed, message: e.message)
     end
   end
 end
@@ -225,31 +251,41 @@ end
 
 ### Controller Error Handling
 
+**Simple version:**
+
 ```ruby
 class OrdersController < ApplicationController
   def create
     result = Orders::CreateService.new.call(order_params)
 
     if result.success?
-      redirect_to result.data, notice: t(".success")
+      redirect_to result.value!, notice: "Order created"
     else
-      handle_service_error(result)
+      flash.now[:alert] = result.failure
+      render :new, status: :unprocessable_entity
     end
   end
+end
+```
 
-  private
+**With structured errors:**
 
-  def handle_service_error(result)
-    case result.code
+```ruby
+def create
+  result = Orders::CreateService.new.call(order_params)
+
+  if result.success?
+    redirect_to result.value!, notice: "Order created"
+  else
+    error = result.failure
+    case error[:code]
     when :empty_cart
-      redirect_to cart_path, alert: result.error
-    when :insufficient_inventory
-      flash.now[:alert] = result.error
+      redirect_to cart_path, alert: error[:message]
+    when :out_of_stock
+      flash.now[:alert] = error[:message]
       render :new, status: :unprocessable_entity
-    when :payment_failed
-      redirect_to checkout_path, alert: result.error
     else
-      flash.now[:alert] = result.error
+      flash.now[:alert] = error[:message]
       render :new, status: :unprocessable_entity
     end
   end

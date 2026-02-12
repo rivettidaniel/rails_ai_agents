@@ -71,27 +71,22 @@ app/services/
 ```ruby
 # app/services/application_service.rb
 class ApplicationService
+  include Dry::Monads[:result]
+
   def self.call(...)
     new(...).call
   end
-
-  private
-
-  def success(data = nil)
-    Result.new(success: true, data: data, error: nil)
-  end
-
-  def failure(error)
-    Result.new(success: false, data: nil, error: error)
-  end
-
-  # Ruby 3.2+ Data.define for immutable result objects
-  Result = Data.define(:success, :data, :error) do
-    def success? = success
-    def failure? = !success
-  end
 end
 ```
+
+**Installation:**
+
+Add to `Gemfile`:
+```ruby
+gem 'dry-monads', '~> 1.6'
+```
+
+Then run: `bundle install`
 
 ### Service Structure
 
@@ -105,15 +100,15 @@ module Entities
     end
 
     def call
-      return failure("User not authorized") unless authorized?
+      return Failure("User not authorized") unless authorized?
 
       entity = build_entity
 
       if entity.save
-        notify_owner
-        success(entity)
+        notify_owner(entity)
+        Success(entity)
       else
-        failure(entity.errors.full_messages.join(", "))
+        Failure(entity.errors.full_messages.join(", "))
       end
     end
 
@@ -133,7 +128,7 @@ module Entities
       params.slice(:name, :description, :address, :phone)
     end
 
-    def notify_owner
+    def notify_owner(entity)
       EntityMailer.created(entity).deliver_later
     end
   end
@@ -155,15 +150,15 @@ module Submissions
     end
 
     def call
-      return failure("You have already submitted") if already_submitted?
+      return Failure("You have already submitted") if already_submitted?
 
       submission = build_submission
 
       if submission.save
         update_entity_rating
-        success(submission)
+        Success(submission)
       else
-        failure(submission.errors.full_messages.join(", "))
+        Failure(submission.errors.full_messages.join(", "))
       end
     end
 
@@ -198,7 +193,7 @@ module Orders
     end
 
     def call
-      return failure("Cart is empty") if cart.empty?
+      return Failure("Cart is empty") if cart.empty?
 
       order = nil
 
@@ -209,11 +204,11 @@ module Orders
         charge_payment(order)
       end
 
-      success(order)
+      Success(order)
     rescue ActiveRecord::RecordInvalid => e
-      failure(e.message)
+      Failure(e.message)
     rescue PaymentError => e
-      failure("Payment error: #{e.message}")
+      Failure("Payment error: #{e.message}")
     end
 
     private
@@ -260,9 +255,9 @@ module Entities
       average = calculate_average_rating
 
       if entity.update(average_rating: average, submissions_count: submissions_count)
-        success(average)
+        Success(average)
       else
-        failure(entity.errors.full_messages.join(", "))
+        Failure(entity.errors.full_messages.join(", "))
       end
     end
 
@@ -296,12 +291,12 @@ module Notifications
     end
 
     def call
-      return failure("User has notifications disabled") unless user.notifications_enabled?
+      return Failure("User has notifications disabled") unless user.notifications_enabled?
 
       notifier.deliver(user: user, message: message)
-      success
+      Success(true)
     rescue NotificationError => e
-      failure(e.message)
+      Failure(e.message)
     end
 
     private
@@ -457,10 +452,10 @@ class EntitiesController < ApplicationController
     )
 
     if result.success?
-      redirect_to result.data, notice: "Entity created successfully"
+      redirect_to result.value!, notice: "Entity created successfully"
     else
       @entity = Entity.new(entity_params)
-      flash.now[:alert] = result.error
+      flash.now[:alert] = result.failure
       render :new, status: :unprocessable_entity
     end
   end
@@ -472,6 +467,29 @@ class EntitiesController < ApplicationController
   end
 end
 ```
+
+### Alternative: Pattern Matching (Ruby 3+)
+
+```ruby
+def create
+  case Entities::CreateService.call(user: current_user, params: entity_params)
+  in Dry::Monads::Success(entity)
+    redirect_to entity, notice: "Entity created successfully"
+  in Dry::Monads::Failure(error)
+    @entity = Entity.new(entity_params)
+    flash.now[:alert] = error
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+### dry-monads Methods
+
+- **`.value!`** - Unwraps Success, raises on Failure
+- **`.value_or(default)`** - Returns value or default
+- **`.bind { |val| ... }`** - Chains operations (returns monad)
+- **`.fmap { |val| ... }`** - Transforms success value
+- **`.or { |err| ... }`** - Handles failure case
 
 ## When to Use a Service Object
 
