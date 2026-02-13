@@ -1,117 +1,22 @@
 # Rails AI Suite (Agents, Commands, Skills)
 
-A curated collection of specialized AI agents for Rails development, organized into four complementary components:
+A curated collection of specialized AI agents for Rails development, organized into three complementary components:
 
-1. **37signals Agents** - Inspired by DHH's "vanilla Rails" philosophy from the Fizzy codebase
-2. **Standard Rails Agents** - Modern Rails patterns with service objects, query objects, and presenters
-3. **Feature Specification Agents** - High-level planning and feature management
-4. **Skills Library** - Reusable knowledge modules for specific Rails patterns and technologies
+1. **Standard Rails Agents** - Modern Rails patterns with service objects, query objects, and presenters
+2. **Feature Specification Agents** - High-level planning and feature management
+3. **Skills Library** - Reusable knowledge modules for specific Rails patterns and technologies
 
 > 🆕 **New:** Check out the [Claude Code Setup Plan](CLAUDE_CODE_SETUP_PLAN.md) for a complete guide on configuring Claude Code with Rails projects, including security hooks, custom commands, and MCP servers. Based on [The Complete Guide to Claude Code V4](https://thedecipherist.com/articles/claude-code-guide-v4/).
 
-Built using insights from [GitHub's analysis of 2,500+ agent.md files](https://github.blog/ai-and-ml/github-copilot/how-to-write-a-great-agents-md-lessons-from-over-2500-repositories/) and [37signals' Fizzy codebase analysis](https://gist.github.com/marckohlbrugge/d363fb90c89f71bd0c816d24d7642aca).
+Built using insights from [GitHub's analysis of 2,500+ agent.md files](https://github.blog/ai-and-ml/github-copilot/how-to-write-a-great-agents-md-lessons-from-over-2500-repositories/).
 
 ## Why This Exists
 
-Most AI coding assistants lack deep Rails context. This suite provides three distinct architectural philosophies:
+Most AI coding assistants lack deep Rails context. This suite provides a comprehensive architectural approach:
 
-- 🎯 **37signals Style**: Rich models, concerns, CRUD-everything approach
 - 🏗️ **Standard Rails**: Service objects, query objects, presenters, form objects
 - 📋 **Feature Planning**: Requirements analysis and implementation orchestration
 - 📚 **Skills Library**: Deep knowledge modules for Rails patterns and technologies
-
-Choose the style that fits your team's philosophy, or mix and match as needed.
-
----
-
-## 37signals Agents
-
-Inspired by the [37signals/DHH coding style guide](https://gist.github.com/marckohlbrugge/d363fb90c89f71bd0c816d24d7642aca) extracted from the Fizzy codebase. These agents follow the "vanilla Rails is plenty" philosophy.
-
-### Core Philosophy
-
-- **Rich models over service objects** - Business logic lives in models
-- **Everything is CRUD** - New resource over new action
-- **State as records** - Not boolean columns (e.g., `Closure` model instead of `closed: true`)
-- **Concerns for composition** - Horizontal behavior sharing (e.g., `Closeable`, `Watchable`)
-- **No callback side effects** - Side effects (emails, notifications) in controllers, not model callbacks
-- **Minimal dependencies** - Build it yourself before reaching for gems
-- **Database-backed everything** - No Redis, Solid Queue/Cache/Cable
-
-### Available Agents
-
-- **`@37signals/model_agent`** - Rich models with concerns (Closeable, Watchable, etc.)
-- **`@37signals/crud_agent`** - Enforce everything-is-CRUD routing
-- **`@37signals/concerns_agent`** - Model & controller concerns for composition
-- **`@37signals/state_records_agent`** - State as records pattern (not booleans)
-- **`@37signals/auth_agent`** - Custom passwordless authentication (~150 LOC)
-- **`@37signals/migration_agent`** - Simple, pragmatic migrations
-- **`@37signals/test_agent`** - RSpec with FactoryBot factories
-- **`@37signals/turbo_agent`** - Hotwire/Turbo patterns
-- **`@37signals/stimulus_agent`** - Focused Stimulus controllers
-- **`@37signals/events_agent`** - Event tracking system
-- **`@37signals/multi_tenant_agent`** - URL-based multi-tenancy
-- **`@37signals/jobs_agent`** - Solid Queue background jobs
-- **`@37signals/mailer_agent`** - Simple mailers
-- **`@37signals/caching_agent`** - Fragment & HTTP caching
-- **`@37signals/api_agent`** - REST API with JSON format
-- **`@37signals/refactoring_agent`** - Incremental refactoring
-- **`@37signals/review_agent`** - Code review for consistency
-- **`@37signals/implement_agent`** - General implementation agent
-
-### 37signals Workflow Example
-
-```
-1. @37signals/crud_agent design routes for card closures (resource, not boolean)
-
-2. @37signals/state_records_agent create Closure model
-
-3. @37signals/concerns_agent add Closeable concern to Card model
-
-4. @37signals/test_agent write RSpec tests
-
-5. @37signals/implement_agent implement the feature
-
-6. @37signals/review_agent check for 37signals conventions
-```
-
-### Key Patterns
-
-**State as Records:**
-```ruby
-# ❌ Not This
-class Card < ApplicationRecord
-  # closed: boolean
-  scope :closed, -> { where(closed: true) }
-end
-
-# ✅ This
-class Closure < ApplicationRecord
-  belongs_to :card, touch: true
-  belongs_to :user
-end
-
-class Card < ApplicationRecord
-  include Closeable  # Concern with close/reopen methods
-  has_one :closure
-  scope :closed, -> { joins(:closure) }
-  scope :open, -> { where.missing(:closure) }
-end
-```
-
-**Everything is CRUD:**
-```ruby
-# ❌ Not This
-resources :cards do
-  post :close
-  post :reopen
-end
-
-# ✅ This
-resources :cards do
-  resource :closure  # POST to close, DELETE to reopen
-end
-```
 
 ---
 
@@ -352,14 +257,6 @@ All agents follow best practices from GitHub's analysis:
 
 ## Tech Stack Support
 
-### 37signals_agents Stack
-- Ruby 3.3+
-- Rails 8.x (edge)
-- PostgreSQL or SQLite
-- Hotwire (Turbo + Stimulus)
-- Solid Queue/Cache/Cable
-- RSpec + FactoryBot
-
 ### Standard Agents Stack
 - Ruby 3.3+
 - Rails 7.x
@@ -371,30 +268,6 @@ All agents follow best practices from GitHub's analysis:
 - Pundit
 - **dry-monads** (Result monad for service objects)
 - RSpec + FactoryBot
-
----
-
-## Choosing Your Style
-
-### Use 37signals Agents When:
-- You prefer Rails conventions over abstractions
-- Your team values simplicity over separation
-- You want rich domain models
-- You're building a monolith with moderate complexity
-- You trust the "vanilla Rails is plenty" philosophy
-
-### Use Standard Rails Agents When:
-- You need clear separation of concerns
-- Your team is large with specialized roles
-- Business logic is complex and growing
-- You value explicit over implicit
-- You follow SOLID principles strictly
-
-### Mix and Match:
-Both approaches are valid! You can:
-- Use 37signals style for simple features, Standard for complex ones
-- Start with 37signals, refactor to Standard as complexity grows
-- Use 37signals models with Standard services for specific use cases
 
 ---
 
@@ -419,14 +292,11 @@ These agents are designed to be customized. Feel free to:
 - Add project-specific commands
 - Include custom validation rules
 - Extend with your own coding standards
-- Create hybrid approaches mixing both styles
 
 ## Credits
 
 Built using insights from:
 - [How to write a great agents.md](https://github.blog/ai-and-ml/github-copilot/how-to-write-a-great-agents-md-lessons-from-over-2500-repositories/) by GitHub
-- [The Unofficial 37signals/DHH Rails Style Guide](https://gist.github.com/marckohlbrugge/d363fb90c89f71bd0c816d24d7642aca) by Marc Köhlbrugge
-- Fizzy codebase analysis (37signals' open-source project management tool)
 
 ## License
 
