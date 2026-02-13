@@ -166,7 +166,11 @@ end
 
 **CRITICAL RULE:** ALL side effects (emails, notifications, API calls, background jobs) belong in the controller AFTER a successful save. NEVER use model callbacks for side effects.
 
-### ✅ Correct Pattern: Side Effects in Controller
+### Two Approaches Based on Complexity
+
+#### ✅ Simple Side Effects (1-2 actions) - Direct in Controller
+
+For 1-2 side effects, keep it simple and explicit:
 
 ```ruby
 class UsersController < ApplicationController
@@ -174,10 +178,8 @@ class UsersController < ApplicationController
     @user = User.new(user_params)
 
     if @user.save
-      # ✅ ALL side effects happen here, after successful save
+      # ✅ Simple case: 1-2 side effects listed directly
       UserMailer.welcome(@user).deliver_later
-      AdminNotifier.new_user_signup(@user).notify
-      SlackNotifier.post_to_channel("New user: #{@user.email}")
       Analytics.track('user_signed_up', @user.id)
 
       redirect_to @user, notice: "Welcome to our platform!"
@@ -187,6 +189,44 @@ class UsersController < ApplicationController
   end
 end
 ```
+
+#### ✅ Multiple Side Effects (3+) - Use Event Dispatcher
+
+For 3+ side effects, use Event Dispatcher pattern (see `@event_dispatcher_agent`):
+
+```ruby
+class UsersController < ApplicationController
+  def create
+    @user = User.new(user_params)
+
+    if @user.save
+      # ✅ Complex case: One explicit dispatch line handles all side effects
+      ApplicationEvent.dispatch(:user_registered, @user)
+
+      redirect_to @user, notice: "Welcome to our platform!"
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+
+# Side effects registered in app/events/user_events.rb:
+# ApplicationEvent.on(:user_registered) { |user| UserMailer.welcome(user).deliver_later }
+# ApplicationEvent.on(:user_registered) { |user| AdminNotifier.new_user_signup(user).notify }
+# ApplicationEvent.on(:user_registered) { |user| SlackNotifier.post("New user: #{user.email}") }
+# ApplicationEvent.on(:user_registered) { |user| Analytics.track('user_signed_up', user.id) }
+# ApplicationEvent.on(:user_registered) { |user| CrmService.sync_user(user) }
+```
+
+**Benefits of Event Dispatcher**:
+- ✅ Controller stays thin (one line)
+- ✅ Side effects are decoupled and testable
+- ✅ Easy to add/remove handlers without touching controller
+- ✅ Still explicit (controller calls `dispatch`)
+
+**When to Use Which**:
+- **1-2 side effects** → Direct in controller (simpler)
+- **3+ side effects** → Event Dispatcher (cleaner, more maintainable)
 
 ### ❌ Anti-Pattern: Side Effects in Model Callbacks
 

@@ -106,9 +106,11 @@ end
 
 ### Broadcast from Model
 
-**⚠️ NOTE:** This is the standard Rails/Turbo pattern, but violates 37signals philosophy.
+**⚠️ NOTE:** This is the standard Rails/Turbo pattern, but violates this project's philosophy.
 
-**37signals approach:** Broadcast explicitly from controller, not from model callbacks.
+**Recommended approach:** Broadcast explicitly from controller, not from model callbacks.
+
+For multiple side effects (3+), use **Event Dispatcher pattern** (see `@event_dispatcher_agent`).
 
 ```ruby
 # Standard Rails/Turbo pattern (NOT 37signals):

@@ -19,12 +19,16 @@ Rails provides multiple caching layers:
 
 This skill shows the **standard Rails pattern** using `after_commit` callbacks for cache invalidation.
 
-However, **37signals philosophy** recommends:
+However, **this project's philosophy** recommends:
 - ❌ NO callbacks for cache invalidation - it's a side effect
 - ✅ Invalidate caches explicitly from controllers after successful save
 - Helper methods in models, called from controllers
+- For multiple side effects (3+), use **Event Dispatcher pattern** (see `@event_dispatcher_agent`)
 
-Choose based on your project's philosophy.
+Choose based on complexity:
+- **1-2 side effects**: Call explicitly from controller
+- **3+ side effects**: Use ApplicationEvent.dispatch()
+- General Rails pattern: Can use callbacks (shown in examples below)
 
 ## Quick Start
 

@@ -691,13 +691,37 @@ end
 #     @submission = Submission.new(submission_params)
 #
 #     if @submission.save
-#       @submission.notify_owner  # ✅ Explicit
+#       @submission.notify_owner  # ✅ Explicit (for 1-2 side effects)
 #       redirect_to @submission
 #     else
 #       render :new, status: :unprocessable_entity
 #     end
 #   end
 # end
+```
+
+**💡 TIP:** For 3+ side effects (email + notifications + analytics + etc.), use **Event Dispatcher pattern**:
+
+```ruby
+# When you have multiple side effects, use Event Dispatcher (see @event_dispatcher_agent)
+class SubmissionsController < ApplicationController
+  def create
+    @submission = Submission.new(submission_params)
+
+    if @submission.save
+      # ✅ One line handles all side effects
+      ApplicationEvent.dispatch(:submission_created, @submission)
+      redirect_to @submission
+    else
+      render :new, status: :unprocessable_entity
+    end
+  end
+end
+
+# app/events/submission_events.rb
+ApplicationEvent.on(:submission_created) { |sub| SubmissionMailer.new_submission(sub).deliver_later }
+ApplicationEvent.on(:submission_created) { |sub| NotificationService.notify_owner(sub) }
+ApplicationEvent.on(:submission_created) { |sub| Analytics.track('submission_created', sub.id) }
 ```
 
 ## Configuration
