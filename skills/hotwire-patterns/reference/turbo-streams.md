@@ -106,13 +106,46 @@ end
 
 ### Broadcast from Model
 
+**⚠️ NOTE:** This is the standard Rails/Turbo pattern, but violates this project's philosophy.
+
+**Recommended approach:** Broadcast explicitly from controller, not from model callbacks.
+
+For multiple side effects (3+), use **Event Dispatcher pattern** (see `@event_dispatcher_agent`).
+
 ```ruby
+# Standard Rails/Turbo pattern (NOT 37signals):
 # app/models/post.rb
 class Post < ApplicationRecord
   after_create_commit { broadcast_prepend_to "posts" }
   after_update_commit { broadcast_replace_to "posts" }
   after_destroy_commit { broadcast_remove_to "posts" }
 end
+
+# 37signals pattern - Helper methods, called from controller:
+class Post < ApplicationRecord
+  def broadcast_creation
+    broadcast_prepend_to "posts"
+  end
+
+  def broadcast_update
+    broadcast_replace_to "posts"
+  end
+
+  def broadcast_removal
+    broadcast_remove_to "posts"
+  end
+end
+
+# Controller explicitly broadcasts:
+# class PostsController
+#   def create
+#     @post = Post.new(post_params)
+#     if @post.save
+#       @post.broadcast_creation  # ✅ Explicit
+#       redirect_to @post
+#     end
+#   end
+# end
 ```
 
 ### Subscribe in View
